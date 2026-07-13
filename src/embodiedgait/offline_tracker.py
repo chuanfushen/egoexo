@@ -27,7 +27,10 @@ import argparse
 import json
 import logging
 import os
+import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import timedelta
 from typing import Any
 
 import numpy as np
@@ -607,7 +610,6 @@ def _run_batch_parallel(
     skip_existing: bool,
 ) -> None:
     """Shared batch executor with node sharding + local thread pool."""
-    # Node sharding: each node takes its slice
     my_tasks = all_tasks[node_rank::world_size]
     if not my_tasks:
         log.info("Node %d/%d: no tasks (total=%d)", node_rank, world_size, len(all_tasks))
@@ -618,7 +620,6 @@ def _run_batch_parallel(
 
     def _process_one(det_path: str, out_path: str, cam: str) -> tuple[str, bool]:
         if skip_existing and _output_exists(out_path):
-            log.info("[%s] SKIP (exists)", cam)
             return cam, False
         try:
             process_detections_file(
@@ -634,22 +635,7 @@ def _run_batch_parallel(
             log.exception("[%s] FAILED", cam)
             return cam, False
 
-    done = 0
-    failed = 0
-    with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        futures = {
-            pool.submit(_process_one, det_path, out_path, cam): cam
-            for det_path, out_path, cam in my_tasks
-        }
-        for future in as_completed(futures):
-            cam, ok = future.result()
-            if ok:
-                done += 1
-            else:
-                failed += 1
-
-    log.info("Node %d/%d done: %d ok, %d skipped/failed",
-             node_rank, world_size, done, failed)
+    _run_with_progress(my_tasks, _process_one, node_rank, world_size, num_workers)
 
 
 def _run_batch_parallel_all(
@@ -675,7 +661,6 @@ def _run_batch_parallel_all(
     def _process_one(det_path, out_path, take, cam):
         label = f"{take}/{cam}"
         if skip_existing and _output_exists(out_path):
-            log.info("[%s] SKIP (exists)", label)
             return label, False
         try:
             process_detections_file(
@@ -691,22 +676,60 @@ def _run_batch_parallel_all(
             log.exception("[%s] FAILED", label)
             return label, False
 
-    done = 0
-    failed = 0
-    with ThreadPoolExecutor(max_workers=num_workers) as pool:
-        futures = {
-            pool.submit(_process_one, det, out, take, cam): f"{take}/{cam}"
-            for det, out, take, cam in my_tasks
-        }
-        for future in as_completed(futures):
-            _, ok = future.result()
-            if ok:
-                done += 1
-            else:
-                failed += 1
+    _run_with_progress(my_tasks, _process_one, node_rank, world_size, num_workers)
 
-    log.info("Node %d/%d done: %d ok, %d skipped/failed",
-             node_rank, world_size, done, failed)
+
+def _run_with_progress(
+    tasks: list,
+    process_fn,
+    node_rank: int,
+    world_size: int,
+    num_workers: int,
+) -> None:
+    """Thread-pool executor with 30s progress logging."""
+    total = len(tasks)
+    state = {"done": 0, "failed": 0, "total": total}
+    start_time = time.time()
+    stop_event = threading.Event()
+
+    def _progress_loop():
+        while not stop_event.is_set():
+            stop_event.wait(30.0)
+            if stop_event.is_set():
+                break
+            completed = state["done"] + state["failed"]
+            remaining = total - completed
+            elapsed = time.time() - start_time
+            if completed > 0:
+                rate = completed / elapsed
+                eta = (remaining / rate) if rate > 0 else 0
+                eta_str = str(timedelta(seconds=int(eta)))
+            else:
+                eta_str = "…"
+            elapsed_str = str(timedelta(seconds=int(elapsed)))
+            log.info("Progress: %d/%d done (%d fail) | %d left | elapsed %s | ETA %s",
+                     state["done"], total, state["failed"],
+                     remaining, elapsed_str, eta_str)
+
+    progress_thread = threading.Thread(target=_progress_loop, daemon=True)
+    progress_thread.start()
+
+    try:
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = {pool.submit(process_fn, *task): task for task in tasks}
+            for future in as_completed(futures):
+                _, ok = future.result()
+                if ok:
+                    state["done"] += 1
+                else:
+                    state["failed"] += 1
+    finally:
+        stop_event.set()
+        progress_thread.join(timeout=1)
+
+    elapsed = str(timedelta(seconds=int(time.time() - start_time)))
+    log.info("Node %d/%d done: %d ok, %d failed, total %d, elapsed %s",
+             node_rank, world_size, state["done"], state["failed"], total, elapsed)
 
 
 # ═══════════════════════════════════════════════════════════════════════
