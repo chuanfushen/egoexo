@@ -204,9 +204,6 @@ def run_bytetrack(
             "tracks": track_list,
         })
 
-        if (frame_idx + 1) % 200 == 0:
-            log.info("  Frame %d: %d active tracks", frame_idx + 1, len(track_list))
-
     return results
 
 
@@ -732,7 +729,8 @@ def _run_with_progress(
             else:
                 eta_str = "…"
             elapsed_str = str(timedelta(seconds=int(elapsed)))
-            log.info("Progress: %d/%d done (%d fail) | %d left | elapsed %s | ETA %s",
+            log.info("[Node %d/%d] Progress: %d/%d done (%d fail) | %d left | elapsed %s | ETA %s",
+                     node_rank, world_size,
                      state["done"], total, state["failed"],
                      remaining, elapsed_str, eta_str)
 
