@@ -322,15 +322,40 @@ def _discover_tos_cams(tos_base: str, take_name: str) -> list[tuple[str, str]]:
 def _resolve_node_info() -> tuple[int, int]:
     """Resolve node rank and world size from environment.
 
-    ``MLP_ROLE_INDEX`` gives this node's rank; ``MLP_WORLD_SIZE`` gives the
-    total number of nodes.  Falls back to single-node (rank=0, world=1) when
-    neither is set.
+    Checks common distributed-launch env vars in order:
+        torchrun / torch.distributed  (``RANK``, ``WORLD_SIZE``)
+        MLP platform                   (``MLP_ROLE_INDEX``, ``MLP_WORLD_SIZE``)
+        SLURM                          (``SLURM_PROCID``, ``SLURM_NTASKS``)
+        OpenMPI                        (``OMPI_COMM_WORLD_RANK``, ``OMPI_COMM_WORLD_SIZE``)
+        PMI                            (``PMI_RANK``, ``PMI_SIZE``)
+
+    Falls back to (0, 1).
     """
-    rank = int(os.environ.get("MLP_ROLE_INDEX", "0"))
-    world = int(os.environ.get("MLP_WORLD_SIZE", "1"))
-    if world > 1:
-        log.info("Multi-node: rank=%d/%d", rank, world)
-    return rank, world
+    # Rank candidates: (rank_key, [world_key_candidates...])
+    rank_candidates = [
+        ("RANK",                  ["WORLD_SIZE"]),
+        ("MLP_ROLE_INDEX",        ["MLP_WORLD_SIZE", "MLP_WORKER_NUM"]),
+        ("SLURM_PROCID",          ["SLURM_NTASKS"]),
+        ("OMPI_COMM_WORLD_RANK",  ["OMPI_COMM_WORLD_SIZE"]),
+        ("PMI_RANK",              ["PMI_SIZE"]),
+    ]
+    for rank_key, world_keys in rank_candidates:
+        rank_val = os.environ.get(rank_key)
+        if rank_val is None:
+            continue
+        rank = int(rank_val)
+        world = 1
+        world_key = None
+        for wk in world_keys:
+            wv = os.environ.get(wk)
+            if wv is not None:
+                world = max(world, int(wv))  # take largest if multiple set
+                world_key = wk
+        if world > 1 and world_key:
+            log.info("Multi-node (%s=%d, %s=%d): rank=%d/%d",
+                     rank_key, rank, world_key, world, rank, world)
+        return rank, world
+    return 0, 1
 
 
 def main():
