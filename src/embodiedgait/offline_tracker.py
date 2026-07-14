@@ -258,7 +258,7 @@ def process_detections_file(
         output_path: Path for tracks.json output.
         target_class: Filter detections to this class.
         crop_dir: If set, crop tracked person bboxes from video into this
-                  local directory (e.g. ``outputs/crops``).
+                  directory (e.g. ``outputs/crops`` or ``tos://bucket/crops``).
         bbox_expand: Scale factor for bbox expansion when cropping (1.0 = no expand).
         **tracker_kwargs: Passed to ``run_bytetrack``.
 
@@ -396,7 +396,7 @@ def main():
     parser.add_argument("--crop", action="store_true",
                         help="Crop tracked person bboxes from video into local --crop-dir")
     parser.add_argument("--crop-dir", type=str, default="outputs/crops",
-                        help="Local directory for cropped person images (default: outputs/crops)")
+                        help="Directory for cropped person images, local or tos:// (default: outputs/crops)")
     parser.add_argument("--bbox-expand", type=float, default=1.2,
                         help="Bbox expansion scale for cropping (default: 1.2)")
 
@@ -782,7 +782,7 @@ def crop_persons_from_tracks(
     Args:
         tracks: Per-frame track list from ``run_bytetrack``.
         detections_data: The original detections.json dict (contains ``video_path``).
-        crop_dir: Local directory root for cropped images.
+        crop_dir: Directory root for cropped images (local or tos://).
         track_ids: If set, only crop these track_ids (None = all).
         max_frames: Limit video frames to read (None = all).
         bbox_expand: Scale factor for bbox expansion around center (1.0 = no expand).
@@ -817,8 +817,14 @@ def crop_persons_from_tracks(
     # ── Read video and crop ───────────────────────────────────────────
     from src.embodiedgait.loader import iter_video_frames
 
-    base_dir = os.path.join(crop_dir, take_name, exo_cam)
+    to_tos = _is_tos(crop_dir)
+    fs = _get_tosfs() if to_tos else None
+    base_dir = crop_dir.rstrip("/") + "/" + take_name + "/" + exo_cam
+    if not to_tos:
+        os.makedirs(base_dir, exist_ok=True)
     track_counts: dict[str, int] = {}
+
+    encode_params = [cv2.IMWRITE_JPEG_QUALITY, 90]
 
     for frame_idx, frame in iter_video_frames(video_path, max_frames=max_frames or max_needed + 1):
         if frame_idx not in frame_tracks:
@@ -839,10 +845,19 @@ def crop_persons_from_tracks(
                 continue
 
             crop = frame[y1:y2, x1:x2]
-            tid_dir = os.path.join(base_dir, str(tid))
-            os.makedirs(tid_dir, exist_ok=True)
-            jpg_path = os.path.join(tid_dir, f"{frame_idx:06d}.jpg")
-            cv2.imwrite(jpg_path, crop, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            jpg_rel = f"{tid}/{frame_idx:06d}.jpg"
+
+            if to_tos:
+                ok, buf = cv2.imencode(".jpg", crop, encode_params)
+                if ok:
+                    jpg_path = f"{base_dir}/{jpg_rel}"
+                    with fs.open(jpg_path.removeprefix("tos://"), "wb") as f:
+                        f.write(buf.tobytes())
+            else:
+                tid_dir = os.path.join(base_dir, str(tid))
+                os.makedirs(tid_dir, exist_ok=True)
+                jpg_path = os.path.join(tid_dir, f"{frame_idx:06d}.jpg")
+                cv2.imwrite(jpg_path, crop, encode_params)
 
             track_counts.setdefault(str(tid), 0)
             track_counts[str(tid)] += 1
