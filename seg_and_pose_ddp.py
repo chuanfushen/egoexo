@@ -1070,6 +1070,11 @@ def main():
     # ── Take selection ──────────────────────────────────────────────────
     parser.add_argument("--take", type=str, default=None)
     parser.add_argument("--all-takes", action="store_true")
+    parser.add_argument(
+        "--reverse",
+        action="store_true",
+        help="Process the discovered sequence/take list in reverse order",
+    )
 
     # ── Misc ────────────────────────────────────────────────────────────
     parser.add_argument("--overwrite", action="store_true")
@@ -1120,6 +1125,9 @@ def main():
             sequences = discover_sequences_tos(input_src, take=args.take)
         else:
             sequences = discover_sequences_local(input_src, take=args.take)
+        if args.reverse:
+            sequences.reverse()
+            log.info("Reversed sequence processing order")
         log.info("Discovered %d sequences total", len(sequences))
     else:
         sequences = []
